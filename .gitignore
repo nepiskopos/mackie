@@ -1,0 +1,28 @@
+# Credentials and secrets
+.env
+
+# Per-org persistent data (profiles, ledgers, checkpoints, SQLite db)
+data/
+
+# Python artifacts
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+
+# IDE settings
+.vscode/
+
+# Chainlit runtime files (uploaded files cache)
+.files/
+
+# Virtual environments
+.venv/
+venv/
+env/
