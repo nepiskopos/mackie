@@ -26,3 +26,7 @@ build/
 .venv/
 venv/
 env/
+
+# WSL quirks
+*:Zone.Identifier
+*Zone.Identifier

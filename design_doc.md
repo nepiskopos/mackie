@@ -270,6 +270,46 @@ What this project intentionally defers for the assignment stage, and the path to
 **Current:** Status transitions happen via natural language ("approve it", "mark it as posted") parsed by the LLM.
 **Fix:** Expose an explicit approval UI in the Chainlit interface — buttons per ledger entry — so non-technical users don't need to know the right phrasing.
 
+### Social media publishing
+**Current (assignment stage):** The `posted` status in the ledger is a label only — it has no effect outside the app. There is no integration with any social media platform API. When a user marks a post as posted, `update_post_status` writes `"posted"` to `profile.json` and nothing else happens.
+**Issue:** The app's entire value proposition is helping staff publish on-brand content. Without publishing, the workflow ends at copy approval — staff must manually copy text into each platform. The `posted` status creates a false impression that the content was actually sent.
+**Fix:** Add a `publish_post` tool that calls platform APIs (Facebook Graph API for Facebook and Instagram, LinkedIn API for LinkedIn). Store OAuth access tokens per org in the database, scoped to a Facebook Page or LinkedIn Organization Page. Gate publishing on `approved` status. Handle token refresh, rate limits, platform-specific media requirements (images required on Instagram, character limits enforced at API submission time), and surface publish errors back to the user. This unblocks the full approval → publish workflow the ledger status model implies.
+
+### Content scheduling
+**Current (assignment stage):** The post ledger schema has no `scheduled_for` field. `generate_calendar` assigns posts to four weekly buckets ("Week 1", "Week 2", …) without specific dates or times.
+**Issue:** Nonprofits publish on a schedule. "Week 2 of July" is not actionable — staff need to know what to post on Tuesday at 9 am. The absence of dates also means the calendar cannot be used to drive automated publishing.
+**Fix:** Add a `scheduled_for` ISO timestamp to the ledger schema. Update `generate_calendar` to derive specific weekday dates from the month/year and the org's timezone. Wire a job queue (Celery + Redis, or a managed scheduler like AWS EventBridge) to trigger `publish_post` at `scheduled_for` time. Expose `scheduled_for` in the ledger display so staff can see the full publishing queue.
+
+### Export to scheduling tools
+**Current (assignment stage):** There is no way to export approved or planned posts to any external tool. All content lives in `profile.json`, readable only by opening the file directly or querying Mackie.
+**Issue:** Most NPO marketing staff already use a scheduling tool (Buffer, Hootsuite, Sprout Social) or a shared spreadsheet. With no export path, Mackie is a dead end — approved content must be manually copied out post by post, defeating the efficiency gain.
+**Fix:** Add a CSV export endpoint for approved/planned posts. For deeper integration, use Buffer's or Hootsuite's publishing APIs to push approved posts directly into their scheduling queues — those platforms handle the scheduling UI, platform-specific formatting validation, and analytics. A CSV endpoint is a one-day addition; a native Buffer/Hootsuite integration is a one-week project.
+
+### Single-org per session
+**Current (assignment stage):** Chainlit binds one org to the session at startup via `AskUserMessage`. Switching orgs requires closing the tab and starting over, losing any in-progress conversation.
+**Issue:** A marketing consultant or agency managing multiple NPO clients cannot switch between orgs in one session. Each context switch is a hard reset with no history recovery. A staff member who mistyped the org name at startup must reload the entire page.
+**Fix:** Store `org_id` in `cl.user_session` (already done) and add an `/org` slash command or UI dropdown to switch orgs mid-session. Update `thread_id` on switch so conversation history remains isolated per org. The `Assistant` class already accepts an explicit `org_id` and `thread_id` — the change is in the Chainlit layer, not the core agent.
+
+### Research staleness
+**Current (assignment stage):** Research is cached in `profile.json` indefinitely after the first run. `refresh_research` must be explicitly requested by the user; there is no staleness detection or automatic prompting.
+**Issue:** An NPO that launches a new campaign, updates its website, or appears in the news will have Mackie suggest outdated content until a user thinks to ask for a refresh. Staff with no visibility into when research was last run will not know it is stale.
+**Fix:** Add a `research_expires_at` field to the profile (set to `research_updated_at` + 7 days, configurable). At the start of each session, check the expiry and surface a proactive warning ("Your research is 14 days old — want me to refresh it?") before the first content request. For orgs with high news velocity, support a `research_ttl_days` preference in `profile.json` to reduce the interval.
+
+### `web_search` results missing prompt injection defence
+**Current (assignment stage):** The `web_search` tool's dispatch branch in `_dispatch()` formats results as plain `[url] title: snippet` text. Only `_format_research_summary()` — called by `research_org` and `refresh_research` — wraps content in `<external_content>` tags.
+**Issue:** A malicious search result returned mid-conversation arrives in the LLM's context without the structural delimiter that the Security Policy section relies on to distinguish untrusted third-party data from legitimate instructions. The prompt injection defence is applied inconsistently: research results are tagged, but ad-hoc web search results are not. An attacker who can influence search results for a query Mackie makes could exploit this gap.
+**Fix:** Wrap each snippet in `<external_content source="web_search" url="...">...</external_content>` tags in the `web_search` dispatch branch of `_dispatch()`, matching the pattern in `_format_research_summary()`. Update `test_web_search_formats_results` in `tests/test_tools.py` to assert the tags are present.
+
+### Silent scraping failures on redirecting sites
+**Current (assignment stage):** `scrape_website` sets `follow_redirects=False` to prevent SSRF via redirect chains. Most production websites redirect HTTP → HTTPS, or non-www → www. These requests return a 3xx response with no body; the scraper returns empty or error content silently.
+**Issue:** An org whose canonical URL resolves via a redirect — the majority of real websites — will have empty `website_content` in their research profile. Mackie proceeds to generate content without the website context it was supposed to have, and neither the user nor the system receives any error.
+**Fix:** After a 3xx response, extract the `Location` header, validate the destination URL through `_is_safe_url`, and retry the GET to the canonical destination. This preserves SSRF protection (the redirected destination is checked before fetching) while handling the common HTTP → HTTPS redirect case. Log a warning if the destination fails `_is_safe_url` so the user knows why scraping was blocked.
+
+### Content calendar generates plans, not full post drafts
+**Current (assignment stage):** `generate_calendar` saves one-sentence angles to the ledger with status `"planned"`. `plan_week()` is given a budget of 250 tokens and asked only for a JSON object with `platform`, `angle`, `pillar`, and `rationale` — not post copy.
+**Issue:** A staff member opening the ledger after calendar generation sees "Week 1: Care package story — Behind the Scenes" but cannot use it without making another request to Mackie. The calendar's potential as a ready-to-review content queue is unrealised; it is a planning summary, not a publishing queue.
+**Fix:** After the four week-level plans are generated, pass each entry back through a draft pipeline: call `litellm.acompletion` with the full platform guidelines (from `skills/{platform}.yaml`) and instruct the model to write complete post copy in the org's voice. Save with status `"draft"` instead of `"planned"` so the content is immediately reviewable and approvable without a follow-up request.
+
 ---
 
 ## Sample Transcript — Required 7-Step Scenario
