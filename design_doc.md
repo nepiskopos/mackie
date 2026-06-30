@@ -310,6 +310,15 @@ What this project intentionally defers for the assignment stage, and the path to
 **Issue:** A staff member opening the ledger after calendar generation sees "Week 1: Care package story — Behind the Scenes" but cannot use it without making another request to Mackie. The calendar's potential as a ready-to-review content queue is unrealised; it is a planning summary, not a publishing queue.
 **Fix:** After the four week-level plans are generated, pass each entry back through a draft pipeline: call `litellm.acompletion` with the full platform guidelines (from `skills/{platform}.yaml`) and instruct the model to write complete post copy in the org's voice. Save with status `"draft"` instead of `"planned"` so the content is immediately reviewable and approvable without a follow-up request.
 
+### LLM-as-judge quality layer
+**Current (assignment stage):** LLM-as-judge is used only in the offline evaluator (`scripts/eval.py`) — it has no presence in the runtime chatbot. The chatbot trusts the single agent LLM to apply preferences, avoid duplicates, and match brand voice correctly with no verification pass.
+**Issue:** The agent LLM can silently drift from the org's voice, produce semantic duplicates that slip past the ledger prompt instruction, or generate a post that technically follows instructions but is off-brand in ways a simple string check would not catch. These failures are only caught when the user notices and corrects manually.
+**Fix:** Introduce asynchronous judge calls at two points in the runtime path:
+- **After `save_post` (draft status):** score the draft against the org's saved voice preference and content pillars (0–3). If below threshold, automatically invoke the agent to revise before surfacing the result to the user. This is the same rubric used in `eval.py` — the infrastructure already exists.
+- **Before surfacing new suggestions:** compare each suggestion against the last 20 ledger entries for semantic similarity. Flag or drop near-duplicates that the context-window prompt instruction missed.
+
+Run both judge calls with a cheap, fast model (e.g. `claude-haiku-4-5-20251001`) to keep latency low. Because they run after the primary LLM response is already generated, the quality gate adds one extra round trip only when content is being saved — not on every conversational turn. The `resolve_model()` abstraction in `agent/config.py` already supports using a different model per call; no new infrastructure is needed.
+
 ---
 
 ## Sample Transcript — Required 7-Step Scenario
